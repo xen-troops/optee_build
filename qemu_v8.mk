@@ -8,6 +8,8 @@ override COMPILE_NS_KERNEL := 64
 COMPILE_S_USER ?= 64
 COMPILE_S_KERNEL ?= 64
 
+ZEPHYR ?= n
+
 ################################################################################
 # If you change this, you MUST run `make arm-tf-clean` first before rebuilding
 ################################################################################
@@ -90,14 +92,22 @@ KERNEL_LOADADDR		?= 0x42200000
 ROOTFS_ENTRY		?= 0x45000000
 ROOTFS_LOADADDR		?= 0x45000000
 
+ZEPHYR_PATH             ?= $(ROOT)/zephyr-optee/zephyr-optee-test
+ZEPHYR_BIN		?= $(ZEPHYR_PATH)/build/zephyr/zephyr.bin
+
 ifeq ($(SPMC_AT_EL),2)
 BL32_DEPS		?= hafnium optee-os
 else
 BL32_DEPS		?= optee-os
 endif
 
+ifeq ($(ZEPHYR),y)
+BL33_BIN		?= $(ZEPHYR_BIN)
+BL33_DEPS		?= zephyr
+else
 BL33_BIN		?= $(UBOOT_BIN)
 BL33_DEPS		?= u-boot
+endif
 
 XEN_PATH		?= $(ROOT)/xen
 XEN_IMAGE		?= $(XEN_PATH)/xen/xen.efi
@@ -115,14 +125,18 @@ endif
 ################################################################################
 # Targets
 ################################################################################
-TARGET_DEPS := arm-tf buildroot linux optee-os qemu
-TARGET_CLEAN := arm-tf-clean buildroot-clean linux-clean optee-os-clean \
-	qemu-clean check-clean
+TARGET_DEPS := arm-tf buildroot optee-os qemu
+TARGET_CLEAN := arm-tf-clean buildroot-clean optee-os-clean qemu-clean check-clean
+
+ifeq ($(ZEPHYR),y)
+TARGET_DEPS		+= zephyr
+TARGET_CLEAN		+= zephyr-clean
+else
+TARGET_DEPS		+= linux $(KERNEL_UIMAGE) $(ROOTFS_UGZ)
+TARGET_CLEAN		+= linux-clean u-boot-clean
+endif
 
 TARGET_DEPS 		+= $(BL33_DEPS)
-
-TARGET_DEPS		+= $(KERNEL_UIMAGE) $(ROOTFS_UGZ)
-TARGET_CLEAN		+= u-boot-clean
 
 ifeq ($(XEN_BOOT),y)
 TARGET_DEPS		+= xen-create-image
@@ -312,6 +326,17 @@ u-boot-clean:
 	$(MAKE) -C $(UBOOT_PATH) $(UBOOT_COMMON_FLAGS) distclean
 
 ################################################################################
+# Zephyr
+################################################################################
+.PHONY: zephyr
+zephyr: buildroot
+	cd $(ZEPHYR_PATH) && \
+	west build -b qemu_cortex_a53 -- -D TA_DEPLOY_DIR=$(BUILDROOT_TARGET_ROOT)/lib/optee_armtz
+
+.PHONY: zephyr-clean
+zephyr-clean:
+	cd $(ZEPHYR_PATH) && \
+	rm -rf build
 
 ################################################################################
 # Linux kernel
@@ -532,9 +557,11 @@ QEMU_BASE_ARGS += -cpu $(QEMU_CPU)
 QEMU_BASE_ARGS += -d unimp -semihosting-config enable=on,target=native
 QEMU_BASE_ARGS += -m $(QEMU_MEM)
 QEMU_BASE_ARGS += -bios bl1.bin
+ifeq ($(ZEPHYR),n)
 QEMU_BASE_ARGS += -initrd rootfs.cpio.gz
 QEMU_BASE_ARGS += -kernel Image
 QEMU_BASE_ARGS += -append 'console=ttyAMA0,38400 keep_bootcon root=/dev/vda2 $(QEMU_KERNEL_BOOTARGS)'
+endif
 QEMU_BASE_ARGS += $(QEMU_XEN)
 QEMU_BASE_ARGS += $(QEMU_EXTRA_ARGS)
 QEMU_BASE_ARGS += -machine virt,acpi=off,secure=on,mte=$(QEMU_MTE),gic-version=$(QEMU_GIC_VERSION),virtualization=$(QEMU_VIRT)
@@ -588,6 +615,12 @@ ifeq ($(XEN_BOOT),y)
 QEMU_CHECK_ARGS += -fsdev local,id=fsdev0,path=../..,security_model=none -device virtio-9p-device,fsdev=fsdev0,mount_tag=host
 endif
 
+ifeq ($(ZEPHYR),y)
+CHECK_EXP_FILE := qemu-check-zephyr.exp
+else
+CHECK_EXP_FILE := qemu-check.exp
+endif
+
 check: $(CHECK_DEPS)
 	ln -sf $(ROOT)/out-br/images/rootfs.cpio.gz $(BINARIES_PATH)/
 	cd $(BINARIES_PATH) && \
@@ -596,7 +629,7 @@ check: $(CHECK_DEPS)
 		export XEN_BOOT=$(XEN_BOOT) && \
 		export XEN_FFA=$(XEN_FFA) && \
 		export RUST_ENABLE=$(RUST_ENABLE) && \
-		expect $(ROOT)/build/qemu-check.exp -- $(check-args) || \
+		expect $(ROOT)/build/$(CHECK_EXP_FILE) -- $(check-args) || \
 		(if [ "$(DUMP_LOGS_ON_ERROR)" ]; then \
 			echo "== $$PWD/serial0.log:"; \
 			cat serial0.log; \

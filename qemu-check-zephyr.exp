@@ -1,0 +1,93 @@
+#!/usr/bin/expect -f
+#
+# This scripts starts QEMU, loads and boots Linux/OP-TEE, then runs
+# tests in the guest. The return code is 0 for success, >0 for error.
+#
+# Options:
+#   -q        Suppress output to stdout (quiet)
+#   --timeout Timeout for each test (sub)case, in seconds [900]
+
+# The time required to run some tests (e.g., key generation tests [4007.*])
+# can be significant and vary widely -- typically, from about one minute to
+# several minutes depending on the host machine.
+# The value here should be sufficient to run the whole optee_test suite
+# ('xtest') with all testsuites enabled (regression+gp+pkcs11).
+set timeout 900
+set basedir [file dirname $argv0]
+set ::quiet 0
+set ncases 0
+
+# Parse command line
+set myargs $argv
+while {[llength $myargs]} {
+	set myargs [lassign $myargs arg]
+	switch -exact -- $arg {
+		"--timeout"	{set myargs [lassign $myargs ::timeout]}
+		"-q"		{set ::quiet 1}
+	}
+}
+
+proc info arg {
+	if {$::quiet==1} { return }
+	puts -nonewline $arg
+	flush stdout
+}
+
+proc check_test_result arg {
+	set casenum "none"
+	expect {
+		# Exit with error status as soon as a test fails
+		-re {  ([^ ]+) FAIL} {
+			info " $expect_out(1,string) FAIL\n"
+			exit 1
+		}
+		# Crude progress indicator: print one # when each test case starts
+		-re {START \- test_(\d+)} {
+			info "#"
+			incr ncases
+			if {$ncases % 50 == 0} { info "\n" }
+			set star 1
+			exp_continue
+		}
+		# Crude progress indicator: print one # when each test subcase starts
+		-re {Begin subcase .*} {
+			if {$star == 1} {
+				set star 0
+				exp_continue
+			}
+			info "#"
+			incr ncases
+			if {$ncases % 50 == 0} { info "\n" }
+			exp_continue
+		}
+		# Exit when result separator is seen
+		-gl "------ TESTSUITE SUMMARY END ------\r\r" {}
+		# Handle errors in TEE core output
+		-i $arg -re {(..TC:[^\n]*assertion[^\n]*failed at[^\n]*)} {
+			info "!!! $expect_out(1,string)\n"
+			exit 1
+		}
+		-i $arg -re {(..TC:[^\n]*Panic at[^\n]*)} {
+			info "!!! $expect_out(1,string)\n"
+			exit 1
+		}
+		timeout {
+			info "!!! Timeout\n"
+			info "TIMEOUT - test case too long or hung? (last test started: $casenum)\n"
+			exit 2
+		}
+	}
+	info "\nStatus: PASS ($ncases test cases)\n"
+}
+
+# Disable echoing of guest output
+log_user 0
+# Save guest console output to a file
+log_file -a -noappend "serial0.log"
+info "Starting QEMU...\n"
+open "serial1.log" "w+"
+spawn -open [open "|tail -f serial1.log"]
+set teecore $spawn_id
+spawn sh -c "$::env(QEMU) $::env(QEMU_CHECK_ARGS)"
+
+check_test_result $teecore
